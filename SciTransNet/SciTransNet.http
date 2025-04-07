@@ -1,0 +1,6 @@
+@SciTransNet_HostAddress = http://localhost:5202
+
+GET {{SciTransNet_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
