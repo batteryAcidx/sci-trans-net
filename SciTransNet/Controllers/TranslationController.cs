@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using SciTransNet.Services.Interfaces;
 
 namespace SciTransNet.Controllers
 {
@@ -6,14 +7,18 @@ namespace SciTransNet.Controllers
     [Route("api/[controller]")]
     public class TranslationController : ControllerBase
     {
-        [HttpPost("test")]
-        public IActionResult Test([FromBody] string input)
+        private readonly ITranslationService _translationService;
+
+        public TranslationController(ITranslationService translationService)
         {
-            return Ok(new
-            {
-                Original = input,
-                Translated = "This is a test response from SciTransNet backend 🚀"
-            });
+            _translationService = translationService;
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Translate([FromBody] string input)
+        {
+            var result = await _translationService.TranslateAsync(input);
+            return Ok(new { original = input, translated = result });
         }
     }
 }
