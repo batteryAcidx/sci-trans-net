@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using SciTransNet.Services.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace SciTransNet.Services
 {
@@ -9,10 +10,12 @@ namespace SciTransNet.Services
     {
         private readonly HttpClient _httpClient;
         private readonly string _apiKey;
+        private readonly ILogger<TranslationService> _logger;
 
-        public TranslationService(HttpClient httpClient, IConfiguration configuration)
+        public TranslationService(HttpClient httpClient, IConfiguration configuration, ILogger<TranslationService> logger)
         {
             _httpClient = httpClient;
+            _logger = logger;
 
             // Check if the API Key is present in the configuration
             _apiKey = configuration["HuggingFace:ApiKey"];
@@ -28,55 +31,48 @@ namespace SciTransNet.Services
         {
             var payload = new
             {
-                inputs = "Translate to simple English: " + inputText
+                inputs = inputText
             };
 
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
 
-            int retries = 3;
-            while (retries > 0)
+            try
             {
-                try
-                {
-                    var response = await _httpClient.PostAsync(
-                        "https://api-inference.huggingface.co/models/google/flan-t5-small", content
-                    );
+                // Perform POST request to HuggingFace API
+                var response = await _httpClient.PostAsync(
+                    "https://api-inference.huggingface.co/models/Helsinki-NLP/opus-mt-en-es", // Model for translation to Spanish
+                    content
+                );
 
-                    if (response.IsSuccessStatusCode)
-                    {
-                        var resultJson = await response.Content.ReadAsStringAsync();
-                        return resultJson;
-                    }
-                    else
-                    {
-                        retries--;
-                        if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable && retries > 0)
-                        {
-                            await Task.Delay(1000);
-                        }
-                        else
-                        {
-                            return $"Request error: {response.StatusCode}";
-                        }
-                    }
-                }
-                catch (Exception ex)
+                // Log the response status code
+                _logger.LogInformation($"HuggingFace API Response: {response.StatusCode}");
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    retries--;
-                    if (retries > 0)
-                    {
-                        await Task.Delay(1000);
-                    }
-                    else
-                    {
-                        return $"Exception: {ex.Message}";
-                    }
+                    // Get the error message from the response
+                    var error = await response.Content.ReadAsStringAsync();
+                    _logger.LogError($"Error from HuggingFace API: {error}");
+                    return $"API request failed. Status code: {response.StatusCode}, Error: {error}";
+                }
+
+                // Read and parse the result from the response
+                var resultJson = await response.Content.ReadAsStringAsync();
+
+                // Attempt to parse the response and extract the translated text
+                using (JsonDocument doc = JsonDocument.Parse(resultJson))
+                {
+                    var translationText = doc.RootElement[0].GetProperty("translation_text").GetString();
+                    return translationText ?? "No translation found.";
                 }
             }
-
-            return "Failed after retries.";
+            catch (Exception ex)
+            {
+                // Log the exception details
+                _logger.LogError($"Exception occurred: {ex.Message}");
+                return $"Exception: {ex.Message}";
+            }
         }
     }
 }
