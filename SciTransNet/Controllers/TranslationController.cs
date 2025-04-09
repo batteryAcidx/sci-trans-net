@@ -1,50 +1,49 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
+using SciTransNet.Models;
 using SciTransNet.Services.Interfaces;
 
 namespace SciTransNet.Controllers
 {
+    [Route("api/translate")]
     [ApiController]
-    [Route("api/[controller]")]
     public class TranslationController : ControllerBase
     {
         private readonly ITranslationService _translationService;
-        private readonly ILogger<TranslationController> _logger;
 
-        public TranslationController(ITranslationService translationService, ILogger<TranslationController> logger)
+        public TranslationController(ITranslationService translationService)
         {
             _translationService = translationService;
-            _logger = logger;
         }
 
-        // Improved input validation
-        [HttpPost]
-        public async Task<IActionResult> Translate([FromBody] string input)
+        [HttpPost("translate")]
+        public async Task<IActionResult> Translate([FromBody] TranslationRequest request)
         {
-            // Validate input
-            if (string.IsNullOrWhiteSpace(input))
+            if (string.IsNullOrWhiteSpace(request.OriginalText) || string.IsNullOrWhiteSpace(request.Mode))
             {
-                _logger.LogWarning("Received empty or invalid input for translation.");
-                return BadRequest(new { error = "Input text cannot be empty." });
+                return BadRequest(new { message = "Original text and mode are required." });
             }
 
             try
             {
-                var result = await _translationService.TranslateAsync(input);
+                var response = await _translationService.TranslateAsync(request.OriginalText, request.Mode);
 
-                if (string.IsNullOrEmpty(result))
+                if (response == null)
                 {
-                    _logger.LogWarning("Translation returned no results.");
-                    return StatusCode(500, new { error = "Translation failed. Please try again." });
+                    return BadRequest(new { message = "Translation failed." });
                 }
 
-                return Ok(new { original = input, translated = result });
+                return Ok(new
+                {
+                    original = response.Original,
+                    mode = response.Mode,
+                    summary = response.Summary,
+                    explanation = response.Explanation,
+                    keyTerms = response.KeyTerms
+                });
             }
             catch (Exception ex)
             {
-                // Log unexpected errors
-                _logger.LogError(ex, "Error occurred while translating text.");
-                return StatusCode(500, new { error = "An unexpected error occurred. Please try again later." });
+                return StatusCode(500, new { message = "An error occurred during translation.", error = ex.Message });
             }
         }
     }
