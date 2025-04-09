@@ -13,47 +13,70 @@ namespace SciTransNet.Services
         public TranslationService(HttpClient httpClient, IConfiguration configuration)
         {
             _httpClient = httpClient;
+
+            // Check if the API Key is present in the configuration
             _apiKey = configuration["HuggingFace:ApiKey"];
+
+            // If the API Key is null or empty, throw an exception
+            if (string.IsNullOrEmpty(_apiKey))
+            {
+                throw new ArgumentException("HuggingFace API Key is missing or invalid in the configuration.");
+            }
         }
 
         public async Task<string> TranslateAsync(string inputText)
         {
-            try
+            var payload = new
             {
-                var payload = new
+                inputs = "Translate to simple English: " + inputText
+            };
+
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+
+            int retries = 3;
+            while (retries > 0)
+            {
+                try
                 {
-                    inputs = "Translate to simple English: " + inputText
-                };
+                    var response = await _httpClient.PostAsync(
+                        "https://api-inference.huggingface.co/models/google/flan-t5-small", content
+                    );
 
-                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-
-                var response = await _httpClient.PostAsync(
-                    "https://api-inference.huggingface.co/models/google/flan-t5-small",
-                    content
-                );
-
-                response.EnsureSuccessStatusCode();  // Throws an exception if the response code is not successful
-
-                var resultJson = await response.Content.ReadAsStringAsync();
-
-                // Deserialize response to extract generated text
-                var jsonResponse = JsonSerializer.Deserialize<List<Dictionary<string, string>>>(resultJson);
-                string simplifiedText = jsonResponse?.FirstOrDefault()?["generated_text"];
-                
-                return simplifiedText ?? "No simplification found.";  // Fallback if the result is empty
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var resultJson = await response.Content.ReadAsStringAsync();
+                        return resultJson;
+                    }
+                    else
+                    {
+                        retries--;
+                        if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable && retries > 0)
+                        {
+                            await Task.Delay(1000);
+                        }
+                        else
+                        {
+                            return $"Request error: {response.StatusCode}";
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    retries--;
+                    if (retries > 0)
+                    {
+                        await Task.Delay(1000);
+                    }
+                    else
+                    {
+                        return $"Exception: {ex.Message}";
+                    }
+                }
             }
-            catch (HttpRequestException ex)
-            {
-                // Handle network errors
-                return $"Request error: {ex.Message}";
-            }
-            catch (Exception ex)
-            {
-                // Handle other errors (like deserialization failures)
-                return $"Error: {ex.Message}";
-            }
+
+            return "Failed after retries.";
         }
     }
 }
