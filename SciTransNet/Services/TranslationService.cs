@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SciTransNet.Services.Interfaces;
+using SciTransNet.Models;
 
 namespace SciTransNet.Services
 {
@@ -28,10 +29,7 @@ namespace SciTransNet.Services
         {
             var prompt = BuildPrompt(inputText, mode);
 
-            var payload = new
-            {
-                inputs = prompt
-            };
+            var payload = new { inputs = prompt };
 
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
@@ -39,29 +37,26 @@ namespace SciTransNet.Services
             try
             {
                 var response = await _httpClient.PostAsync(
-                    "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta", content
+                    "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1", content
                 );
 
                 _logger.LogInformation($"HuggingFace API Response: {response.StatusCode}");
 
+                var resultJson = await response.Content.ReadAsStringAsync();
+                _logger.LogDebug("Raw model output: " + resultJson);
+
                 if (!response.IsSuccessStatusCode)
                 {
-                    var error = await response.Content.ReadAsStringAsync();
-                    _logger.LogError($"API error: {error}");
+                    _logger.LogError("API error: " + resultJson);
                     return new TranslationResponse
                     {
                         Original = inputText,
                         Mode = mode,
-                        Summary = $"API error: {response.StatusCode} - {error}"
+                        Summary = $"API error: {response.StatusCode} - {resultJson}"
                     };
                 }
 
-                var resultJson = await response.Content.ReadAsStringAsync();
-
-                using var doc = JsonDocument.Parse(resultJson);
-                var fullText = doc.RootElement[0].GetProperty("generated_text").GetString();
-
-                return ParseStructuredResponse(inputText, mode, fullText ?? "");
+                return ParseStructuredResponse(inputText, mode, resultJson);
             }
             catch (Exception ex)
             {
@@ -79,10 +74,21 @@ namespace SciTransNet.Services
         {
             return mode switch
             {
-                "simplify" => $"You are a science tutor explaining to a high school student. Rewrite the following in very simple English. Keep it short, friendly, and easy to understand:\n\n\"{input}\"\n\nYour response should include:\n1. A short summary\n2. A simple explanation\n3. A list of key terms\nFormat the output in JSON with keys: summary, explanation, keyTerms.",
-                "academic" => $"You are an academic researcher. Rewrite the following sentence with technical precision and scholarly tone, elaborating on relevant terms and theories. Keep it under 300 words.\n\n\"{input}\"\n\nReturn the response as a JSON object with: summary, explanation, keyTerms.",
-                "concept" => $"Break down this concept by identifying its main components, their relationships, and real-world examples. Structure the response with labeled sections and format it as JSON:\n\n\"{input}\"\n\nYour response should include:\n1. summary\n2. explanation\n3. keyTerms",
-                _ => $"Explain this clearly:\n\"{input}\""
+                "simplify" =>
+                    $"Please respond ONLY in this JSON format: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...]}}.\n" +
+                    $"Input: \"{input}\".\n" +
+                    $"Simplify it in friendly, easy language for a high school student. Max 100 words per field. Max 5 key terms.",
+
+                "academic" =>
+                    $"You are an academic researcher. Rewrite the following sentence with technical precision and scholarly tone. Keep it under 150 words. " +
+                    $"Return only this JSON format: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...]}}:\n\n\"{input}\"",
+
+                "concept" =>
+                    $"Break this concept into a JSON structure: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...],\"components\":{{...}},\"examples\":{{...}}}}.\n\n" +
+                    $"Input:\n\"{input}\"",
+
+                _ =>
+                    $"Explain clearly: \"{input}\""
             };
         }
 
@@ -90,22 +96,43 @@ namespace SciTransNet.Services
         {
             try
             {
-                var result = JsonSerializer.Deserialize<TranslationResponse>(rawResponse, new JsonSerializerOptions
+                using var doc = JsonDocument.Parse(rawResponse);
+
+                if (doc.RootElement.ValueKind == JsonValueKind.Array &&
+                    doc.RootElement.GetArrayLength() > 0 &&
+                    doc.RootElement[0].TryGetProperty("generated_text", out var gen))
                 {
-                    PropertyNameCaseInsensitive = true
-                });
+                    var innerText = gen.GetString();
 
-                if (result == null)
-                    throw new Exception("Deserialization returned null.");
+                    if (!string.IsNullOrWhiteSpace(innerText))
+                    {
+                        int startIndex = innerText.IndexOf('{');
+                        int endIndex = innerText.LastIndexOf('}');
+                        if (startIndex >= 0 && endIndex > startIndex)
+                        {
+                            var jsonPayload = innerText.Substring(startIndex, endIndex - startIndex + 1);
 
-                result.Original = original;
-                result.Mode = mode;
+                            var options = new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
+                            };
 
-                return result;
+                            var parsed = JsonSerializer.Deserialize<TranslationResponse>(jsonPayload, options);
+                            if (parsed != null)
+                            {
+                                parsed.Original = original;
+                                parsed.Mode = mode;
+                                return parsed;
+                            }
+                        }
+                    }
+                }
+
+                throw new Exception("Could not extract structured JSON.");
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("Failed to parse structured response. Returning fallback format.");
+                _logger.LogWarning("Fallback due to parsing error: " + ex.Message);
                 return new TranslationResponse
                 {
                     Original = original,
