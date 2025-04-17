@@ -7,6 +7,7 @@ using System.IO;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace SciTransNet.Services
 {
@@ -18,12 +19,15 @@ namespace SciTransNet.Services
 
             using var stream = file.OpenReadStream();
 
-            return extension switch
+            var rawText = extension switch
             {
                 ".pdf" => ExtractFromPdf(stream),
                 ".docx" => ExtractFromDocx(stream),
+                ".txt" => await ExtractFromTxtAsync(stream),
                 _ => throw new NotSupportedException("Unsupported file format.")
             };
+
+            return CleanAndStructureText(rawText);
         }
 
         private string ExtractFromPdf(Stream stream)
@@ -52,6 +56,37 @@ namespace SciTransNet.Services
                 .ToString();
 
             return text;
+        }
+
+        private async Task<string> ExtractFromTxtAsync(Stream stream)
+        {
+            using var reader = new StreamReader(stream);
+            return await reader.ReadToEndAsync();
+        }
+
+        private string CleanAndStructureText(string rawText)
+        {
+            if (string.IsNullOrWhiteSpace(rawText))
+                return string.Empty;
+
+            // Replace smart quotes, cleanup formatting artifacts
+            string cleaned = rawText
+                .Replace("“", "\"")
+                .Replace("”", "\"")
+                .Replace("‘", "'")
+                .Replace("’", "'")
+                .Replace("\\n", " ")
+                .Replace("\r", "")
+                .Replace("\t", " ")
+                .Replace("  ", " ");
+
+            // Insert line breaks before sections like FOCUS, LOGIC, FEATURES, etc.
+            cleaned = Regex.Replace(cleaned, @"\b(FOCUS|LOGIC|FEATURES|IMPLICATIONS)\b", "\n\n$1\n", RegexOptions.IgnoreCase);
+
+            // Add paragraph breaks after sentence endings followed by uppercase (start of new paragraph or heading)
+            cleaned = Regex.Replace(cleaned, @"(?<=[.?!])\s+(?=[A-Z])", "\n\n");
+
+            return cleaned.Trim();
         }
     }
 }
