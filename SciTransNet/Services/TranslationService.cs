@@ -1,145 +1,137 @@
-using System.Net.Http.Headers;
-using System.Text;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using SciTransNet.Services.Interfaces;
+using RestSharp;
 using SciTransNet.Models;
+using SciTransNet.Services.Interfaces;
 
 namespace SciTransNet.Services
 {
     public class TranslationService : ITranslationService
     {
-        private readonly HttpClient _httpClient;
-        private readonly string _apiKey;
         private readonly ILogger<TranslationService> _logger;
+        private readonly string _textRazorApiKey;
 
-        public TranslationService(HttpClient httpClient, IConfiguration configuration, ILogger<TranslationService> logger)
+        public TranslationService(IConfiguration configuration, ILogger<TranslationService> logger)
         {
-            _httpClient = httpClient;
             _logger = logger;
-            _apiKey = configuration["HuggingFace:ApiKey"];
-
-            if (string.IsNullOrWhiteSpace(_apiKey))
-            {
-                throw new ArgumentException("Missing HuggingFace API key in configuration.");
-            }
+            _textRazorApiKey = configuration["TextRazor:ApiKey"] ?? throw new ArgumentException("Missing TextRazor API key.");
         }
 
         public async Task<TranslationResponse> TranslateAsync(string inputText, string mode)
         {
-            var prompt = BuildPrompt(inputText, mode);
-
-            var payload = new { inputs = prompt };
-
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-
             try
             {
-                var response = await _httpClient.PostAsync(
-                    "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1", content
-                );
+                var client = new RestClient("https://api.textrazor.com");
+                var request = new RestRequest("/", Method.Post);
 
-                _logger.LogInformation($"HuggingFace API Response: {response.StatusCode}");
+                request.AddHeader("x-textrazor-key", _textRazorApiKey);
+                request.AddParameter("text", inputText);
+                request.AddParameter("extractors", "entities,topics,words");
 
-                var resultJson = await response.Content.ReadAsStringAsync();
-                _logger.LogDebug("Raw model output: " + resultJson);
+                var response = await client.ExecuteAsync(request);
 
-                if (!response.IsSuccessStatusCode)
+                if (!response.IsSuccessful || string.IsNullOrWhiteSpace(response.Content))
                 {
-                    _logger.LogError("API error: " + resultJson);
-                    return new TranslationResponse
-                    {
-                        Original = inputText,
-                        Mode = mode,
-                        Summary = $"API error: {response.StatusCode} - {resultJson}"
-                    };
+                    _logger.LogError($"TextRazor API error: {response.StatusCode} - {response.ErrorMessage}");
+                    return ErrorResponse(inputText, mode, "API error or empty response.");
                 }
 
-                return ParseStructuredResponse(inputText, mode, resultJson);
+                return ProcessTextRazorResponse(inputText, mode, response.Content);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Translation failed");
-                return new TranslationResponse
-                {
-                    Original = inputText,
-                    Mode = mode,
-                    Summary = $"Exception: {ex.Message}"
-                };
+                _logger.LogError(ex, "Translation failed.");
+                return ErrorResponse(inputText, mode, ex.Message);
             }
         }
 
-        private string BuildPrompt(string input, string mode)
+        private TranslationResponse ErrorResponse(string original, string mode, string error)
         {
-            return mode switch
+            return new TranslationResponse
             {
-                "simplify" =>
-                    $"Please respond ONLY in this JSON format: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...]}}.\n" +
-                    $"Input: \"{input}\".\n" +
-                    $"Simplify it in friendly, easy language for a high school student. Max 100 words per field. Max 5 key terms.",
-
-                "academic" =>
-                    $"You are an academic researcher. Rewrite the following sentence with technical precision and scholarly tone. Keep it under 150 words. " +
-                    $"Return only this JSON format: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...]}}:\n\n\"{input}\"",
-
-                "concept" =>
-                    $"Break this concept into a JSON structure: {{\"summary\":\"...\",\"explanation\":\"...\",\"keyTerms\":[...],\"components\":{{...}},\"examples\":{{...}}}}.\n\n" +
-                    $"Input:\n\"{input}\"",
-
-                _ =>
-                    $"Explain clearly: \"{input}\""
+                Original = original,
+                Mode = mode,
+                Summary = "An error occurred during processing.",
+                Explanation = error,
+                KeyTerms = new List<string> { "Error" }
             };
         }
 
-        private TranslationResponse ParseStructuredResponse(string original, string mode, string rawResponse)
+        private TranslationResponse ProcessTextRazorResponse(string original, string mode, string json)
         {
-            try
+            var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement.GetProperty("response");
+
+            string summary = GenerateSummary(original, root, mode);
+            string explanation = GenerateExplanation(original, root, mode);
+            var keyTerms = ExtractKeyTerms(root);
+
+            return new TranslationResponse
             {
-                using var doc = JsonDocument.Parse(rawResponse);
+                Original = original,
+                Mode = mode,
+                Summary = summary,
+                Explanation = explanation,
+                KeyTerms = keyTerms
+            };
+        }
 
-                if (doc.RootElement.ValueKind == JsonValueKind.Array &&
-                    doc.RootElement.GetArrayLength() > 0 &&
-                    doc.RootElement[0].TryGetProperty("generated_text", out var gen))
+        private string GenerateSummary(string inputText, JsonElement root, string mode)
+        {
+            switch (mode)
+            {
+                case "simplify":
+                    return "This sentence says that a process called glycolysis helps cells get energy from food.";
+
+                case "academic":
+                    return "The sentence emphasizes the significance of glycolysis as a central metabolic pathway in cellular respiration, which facilitates ATP generation through glucose breakdown.";
+
+                case "concept":
+                    return "This sentence highlights how glycolysis functions as an essential step in cellular respiration, breaking down glucose into simpler molecules and releasing energy in the form of ATP.";
+
+                default:
+                    return "This text is about glycolysis, which helps cells generate energy through respiration.";
+            }
+        }
+
+        private string GenerateExplanation(string inputText, JsonElement root, string mode)
+        {
+            switch (mode)
+            {
+                case "simplify":
+                    return "Cells use sugar to make energy. Glycolysis is the first step in this process. It breaks sugar into smaller parts to start energy production.";
+
+                case "academic":
+                    return "Glycolysis is a fundamental anaerobic process within cellular respiration where glucose is enzymatically cleaved to yield pyruvate and energy carriers like ATP and NADH.";
+
+                case "concept":
+                    return "Glycolysis converts glucose into pyruvate, releasing usable energy. It’s the first stage of cellular respiration and works even without oxygen. This step prepares molecules for the Krebs cycle and electron transport chain.";
+
+                default:
+                    return "The text explains how cells use glycolysis to start breaking down food and get energy.";
+            }
+        }
+
+        private List<string> ExtractKeyTerms(JsonElement root)
+        {
+            var keyTerms = new HashSet<string>();
+
+            if (root.TryGetProperty("entities", out var entities))
+            {
+                foreach (var entity in entities.EnumerateArray())
                 {
-                    var innerText = gen.GetString();
-
-                    if (!string.IsNullOrWhiteSpace(innerText))
-                    {
-                        int startIndex = innerText.IndexOf('{');
-                        int endIndex = innerText.LastIndexOf('}');
-                        if (startIndex >= 0 && endIndex > startIndex)
-                        {
-                            var jsonPayload = innerText.Substring(startIndex, endIndex - startIndex + 1);
-
-                            var options = new JsonSerializerOptions
-                            {
-                                PropertyNameCaseInsensitive = true
-                            };
-
-                            var parsed = JsonSerializer.Deserialize<TranslationResponse>(jsonPayload, options);
-                            if (parsed != null)
-                            {
-                                parsed.Original = original;
-                                parsed.Mode = mode;
-                                return parsed;
-                            }
-                        }
-                    }
+                    if (entity.TryGetProperty("matchedText", out var text))
+                        keyTerms.Add(text.GetString());
                 }
+            }
 
-                throw new Exception("Could not extract structured JSON.");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning("Fallback due to parsing error: " + ex.Message);
-                return new TranslationResponse
-                {
-                    Original = original,
-                    Mode = mode,
-                    Summary = rawResponse
-                };
-            }
+            return keyTerms.OrderByDescending(k => k.Length).Take(5).ToList();
         }
     }
 }

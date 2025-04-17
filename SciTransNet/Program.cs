@@ -13,6 +13,7 @@ builder.Configuration
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<ITranslationService, TranslationService>();
 builder.Services.AddScoped<IFileParserService, FileParserService>();
+builder.Services.AddScoped<ITranslationService, TranslationService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();

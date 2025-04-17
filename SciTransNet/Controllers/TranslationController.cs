@@ -15,7 +15,7 @@ namespace SciTransNet.Controllers
             _translationService = translationService;
         }
 
-        [HttpPost("translate")]
+        [HttpPost]
         public async Task<IActionResult> Translate([FromBody] TranslationRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.OriginalText) || string.IsNullOrWhiteSpace(request.Mode))
